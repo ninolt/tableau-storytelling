@@ -170,65 +170,21 @@ def _(mo):
 
 @app.cell
 def _():
-    # Analysis period parameters
-    ANALYSIS_START_YEAR = 2021
-    ANALYSIS_END_YEAR = 2024
-    YEARS_FOR_CONTINUITY = ANALYSIS_END_YEAR - ANALYSIS_START_YEAR + 1
+    MIN_SALES = 2
 
-    # Facility Type Filters by Strategic Cluster
-    FACILITY_TYPES_NEIGHBORHOOD_ESSENTIALS: list[str] = [
+    SELECTED_FACILITY_TYPES: list[str] = [
         "B207",  # Boulangerie-pâtisserie (Indispensable)
-        "A504",  # Restaurant-restauration rapide (Social life)
         "B201",  # Supérette (Emergency shopping)
         "B202",  # Épicerie (Emergency shopping)
         "B105",  # Supermarché (Weekly groceries)
-        "B204",  # Boucherie charcuterie (Quality indicator)
-        "A501",  # Coiffure (Proximity service)
-        "B324",  # Librairie (Cultural marker)
-    ]
-
-    FACILITY_TYPES_FAMILY: list[str] = [
-        "D502",  # Établissement d'accueil du jeune enfant (Crèches)
         "C107",  # École maternelle
         "C108",  # École primaire
-        "C201",  # Collège
-        "C301",  # Lycée
-    ]
-
-    FACILITY_TYPES_HEALTH: list[str] = [
         "D265",  # Médecin généraliste
         "D307",  # Pharmacie
-        "D277",  # Chirurgien dentiste
-        "D281",  # Infirmier
-        "D106",  # Urgences
-    ]
-
-    FACILITY_TYPES_LIFESTYLE_SPORT: list[str] = [
-        "F120",  # Salles de remise en forme (Fitness)
-        "F101",  # Bassin de natation (Swimming pools)
-        "F103",  # Tennis
-        "F111",  # Plateaux et terrains de jeux (City stades)
-        "F303",  # Cinéma
-        "F307",  # Bibliothèque / Médiathèque
-    ]
-
-    FACILITY_TYPES_CONNECTIVITY: list[str] = [
-        "E108",  # Gares régionales
-        "E109",  # Gares locales
-        "B326",  # Station de recharge de véhicules électriques
         "A203",  # Banque, caisse d'épargne
         "A206",  # Bureau de poste
     ]
-
-    # Consolidated list of all selected facility types
-    SELECTED_FACILITY_TYPES: list[str] = (
-        FACILITY_TYPES_NEIGHBORHOOD_ESSENTIALS
-        + FACILITY_TYPES_FAMILY
-        + FACILITY_TYPES_HEALTH
-        + FACILITY_TYPES_LIFESTYLE_SPORT
-        + FACILITY_TYPES_CONNECTIVITY
-    )
-    return SELECTED_FACILITY_TYPES, YEARS_FOR_CONTINUITY
+    return MIN_SALES, SELECTED_FACILITY_TYPES
 
 
 @app.cell(hide_code=True)
@@ -244,9 +200,6 @@ def _(mo):
 
 @app.cell
 def _(dvf_csv_path, pl):
-    MIN_SALES_HOUSE = 2
-    MIN_SALES_APARTMENT = 3
-
     dvf_base = (
         pl.scan_csv(dvf_csv_path, schema_overrides={"code_commune": pl.String})
         .select(
@@ -258,64 +211,49 @@ def _(dvf_csv_path, pl):
                 "code_commune",
                 "code_type_local",
                 "surface_reelle_bati",
-                "surface_terrain",
-                "nombre_pieces_principales",
             ]
         )
-        .with_columns(
-            [
-                pl.col("date_mutation").str.to_date(),
-                pl.col("surface_terrain").fill_null(0),
-            ]
-        )
+        .with_columns(pl.col("date_mutation").str.to_date())
         .filter(
             (pl.col("date_mutation") >= pl.date(2021, 1, 1))
             & (pl.col("date_mutation") <= pl.date(2024, 12, 31))
             & (pl.col("nature_mutation") == "Vente")
             & (pl.col("valeur_fonciere").is_not_null())
             & (pl.col("valeur_fonciere") > 0)
+            & ~pl.col("code_commune").str.starts_with("97")
+            & ~pl.col("code_commune").str.starts_with("98")
         )
         .drop("nature_mutation")
     )
-    return MIN_SALES_APARTMENT, MIN_SALES_HOUSE, dvf_base
+    return (dvf_base,)
 
 
 @app.cell
 def _(dvf_base, pl):
-    dvf_by_mutation = (
-        dvf_base.filter(~(pl.col("code_type_local") == 4).any().over("id_mutation"))
-        .filter(
-            ~(pl.col("surface_reelle_bati").fill_null(0) == 0).all().over("id_mutation")
-        )
-        .group_by("id_mutation")
+    dvf_cleaned = (
+        dvf_base.group_by("id_mutation")
         .agg(
             [
                 pl.col("date_mutation").first(),
                 pl.col("valeur_fonciere").first(),
                 pl.col("code_commune").first(),
-                pl.col("surface_terrain").first(),
-                pl.col("code_type_local").min(),
-                pl.col("surface_reelle_bati").fill_null(0).sum(),
-                pl.col("nombre_pieces_principales").fill_null(0).sum(),
+                (pl.col("code_type_local") == 4).any().alias("has_type_4"),
+                pl.col("surface_reelle_bati")
+                .fill_null(0)
+                .sum()
+                .alias("surface_reelle_bati"),
             ]
         )
+        .filter(~pl.col("has_type_4") & (pl.col("surface_reelle_bati") > 0))
+        .drop("has_type_4")
     )
-    return (dvf_by_mutation,)
+    return (dvf_cleaned,)
 
 
 @app.cell
-def _(dvf_by_mutation, pl):
-    metrics_to_split = [
-        "valeur_fonciere",
-        "surface_terrain",
-        "surface_reelle_bati",
-        "nombre_pieces_principales",
-        "prix_m2",
-    ]
-
+def _(dvf_cleaned, pl):
     dvf_with_metrics = (
-        dvf_by_mutation.filter(pl.col("surface_reelle_bati") > 0)
-        .with_columns(
+        dvf_cleaned.with_columns(
             [
                 pl.col("date_mutation").dt.year().alias("year"),
                 (pl.col("valeur_fonciere") / pl.col("surface_reelle_bati")).alias(
@@ -323,196 +261,91 @@ def _(dvf_by_mutation, pl):
                 ),
             ]
         )
-        .with_columns(
-            [
-                *[
-                    pl.when(pl.col("code_type_local") == 1)
-                    .then(pl.col(m))
-                    .alias(f"{m}_house")
-                    for m in metrics_to_split
-                ],
-                *[
-                    pl.when(pl.col("code_type_local") == 2)
-                    .then(pl.col(m))
-                    .alias(f"{m}_apartment")
-                    for m in metrics_to_split
-                ],
-            ]
-        )
+        .drop(["date_mutation", "valeur_fonciere", "surface_reelle_bati"])
+        .filter(pl.col("year").is_in([2021, 2024]))
     )
-    return dvf_with_metrics, metrics_to_split
+    return (dvf_with_metrics,)
 
 
 @app.cell
-def _(
-    MIN_SALES_APARTMENT,
-    MIN_SALES_HOUSE,
-    dvf_with_metrics,
-    metrics_to_split,
-    pl,
-):
-    dvf_commune_agg = (
-        dvf_with_metrics.group_by(["code_commune", "year"])
-        .agg(
-            [
-                *[
-                    pl.col(f"{m}_house").mean().alias(f"avg_{m}_house")
-                    for m in metrics_to_split
-                ],
-                *[
-                    pl.col(f"{m}_apartment").mean().alias(f"avg_{m}_apartment")
-                    for m in metrics_to_split
-                ],
-                *[pl.col(m).mean().alias(f"avg_{m}_global") for m in metrics_to_split],
-                pl.col("prix_m2_house").median().alias("median_prix_m2_house"),
-                pl.col("prix_m2_apartment").median().alias("median_prix_m2_apartment"),
-                pl.col("prix_m2").median().alias("median_prix_m2_global"),
-                pl.col("id_mutation")
-                .filter(pl.col("code_type_local") == 1)
-                .count()
-                .alias("count_sales_house"),
-                pl.col("id_mutation")
-                .filter(pl.col("code_type_local") == 2)
-                .count()
-                .alias("count_sales_apartment"),
-            ]
-        )
-        .with_columns(
-            [
-                pl.when(pl.col("count_sales_house") >= MIN_SALES_HOUSE)
-                .then(pl.col("count_sales_house"))
-                .otherwise(0)
-                .alias("count_sales_house"),
-                pl.when(pl.col("count_sales_apartment") >= MIN_SALES_APARTMENT)
-                .then(pl.col("count_sales_apartment"))
-                .otherwise(0)
-                .alias("count_sales_apartment"),
-            ]
-        )
-        .with_columns(
-            [
-                (pl.col("count_sales_house") + pl.col("count_sales_apartment")).alias(
-                    "count_sales_global"
-                )
-            ]
-        )
-        .with_columns(
-            [
-                pl.when(pl.col("count_sales_house") >= MIN_SALES_HOUSE)
-                .then(pl.col("^(avg|median)_.*_house$"))
-                .otherwise(None)
-                .name.keep(),
-                pl.when(pl.col("count_sales_apartment") >= MIN_SALES_APARTMENT)
-                .then(pl.col("^(avg|median)_.*_apartment$"))
-                .otherwise(None)
-                .name.keep(),
-            ]
-        )
-    )
-    return (dvf_commune_agg,)
+def _(MIN_SALES, dvf_with_metrics, pl):
+    dvf_agg = dvf_with_metrics.group_by(
+        ["code_commune", "year"]
+    ).agg(
+        [
+            pl.col("prix_m2").mean().alias("avg_prix_m2"),
+            pl.col("prix_m2").median().alias("median_prix_m2"),
+            pl.col("id_mutation").count().alias("count_sales"),
+        ]
+    ).filter(pl.col("count_sales") >= MIN_SALES)
+    return (dvf_agg,)
 
 
 @app.cell
-def _(YEARS_FOR_CONTINUITY, dvf_commune_agg, pl):
-    dvf_filtered = (
-        dvf_commune_agg.with_columns(
-            [
-                (
-                    pl.col("avg_valeur_fonciere_house")
-                    .is_not_null()
-                    .sum()
-                    .over("code_commune")
-                    == YEARS_FOR_CONTINUITY
-                ).alias("has_house_continuity"),
-                (
-                    pl.col("avg_valeur_fonciere_apartment")
-                    .is_not_null()
-                    .sum()
-                    .over("code_commune")
-                    == YEARS_FOR_CONTINUITY
-                ).alias("has_apartment_continuity"),
-            ]
+def _(dvf_agg, pl):
+    communes_with_both_years = (
+        dvf_agg.group_by("code_commune")
+        .agg(pl.col("year").unique().alias("years"))
+        .filter(
+            pl.col("years").list.contains(2021)
+            & pl.col("years").list.contains(2024)
         )
-        .with_columns(
-            [
-                pl.when(pl.col("has_house_continuity"))
-                .then(pl.col("^(avg|median)_.*_house$"))
-                .otherwise(None)
-                .name.keep(),
-                pl.when(pl.col("has_apartment_continuity"))
-                .then(pl.col("^(avg|median)_.*_apartment$"))
-                .otherwise(None)
-                .name.keep(),
-            ]
-        )
-        .filter(pl.col("has_house_continuity") | pl.col("has_apartment_continuity"))
-        .drop(["has_house_continuity", "has_apartment_continuity"])
+        .select(["code_commune"])
     )
-    return (dvf_filtered,)
+
+    dvf_complete_years = dvf_agg.join(
+        communes_with_both_years, on="code_commune", how="semi"
+    )
+    return (dvf_complete_years,)
 
 
 @app.cell
-def _(dvf_filtered, pl):
-    metrics = ["avg_prix_m2_global", "avg_prix_m2_apartment", "avg_prix_m2_house"]
+def _(dvf_complete_years, pl):
+    # Collect and pivot on year to get 2021 and 2024 as separate columns
+    dvf_collected = dvf_complete_years.collect()
 
-    dvf_with_growth = (
-        dvf_filtered.filter(pl.col("year").is_in([2021, 2024]))
-        .with_columns(
-            [
-                pl.when(pl.col("year") == year)
-                .then(pl.col(metric))
-                .otherwise(None)
-                .alias(f"{metric}_{year}")
-                for year in [2021, 2024]
-                for metric in metrics
-            ]
+    dvf_pivoted = dvf_collected.pivot(
+        on="year",
+        values=["avg_prix_m2", "median_prix_m2", "count_sales"],
+        index="code_commune",
+    )
+
+    # Calculate growth and keep only 2024 data with growth metric
+    dvf_final = (
+        dvf_pivoted.with_columns(
+            growth_prix_m2=(
+                (pl.col("median_prix_m2_2024") - pl.col("median_prix_m2_2021"))
+                / pl.col("median_prix_m2_2021")
+                * 100
+                / 4
+            )
         )
-        .group_by("code_commune")
-        .agg(
-            [
-                pl.col(f"{metric}_{year}").max()
-                for year in [2021, 2024]
-                for metric in metrics
-            ]
-        )
-        .with_columns(
-            [
-                (
-                    (pl.col(f"{metric}_2024") - pl.col(f"{metric}_2021"))
-                    / pl.col(f"{metric}_2021")
-                    * 100
-                ).alias(f"price_growth_pct_{metric.split('_')[-1]}")
-                for metric in metrics
-            ]
+        .filter(
+            (pl.col("growth_prix_m2") >= -100)
+            & (pl.col("growth_prix_m2") <= 200)
         )
         .select(
             [
                 "code_commune",
-                "price_growth_pct_house",
-                "price_growth_pct_apartment",
-                "price_growth_pct_global",
+                pl.col("avg_prix_m2_2024").alias("avg_prix_m2"),
+                pl.col("median_prix_m2_2024").alias("median_prix_m2"),
+                pl.col("count_sales_2024").alias("count_sales"),
+                "growth_prix_m2",
             ]
         )
-    )
-
-    dvf_final = dvf_filtered.join(
-        dvf_with_growth, on="code_commune", how="left"
-    ).select(
-        [
-            "code_commune",
-            "year",
-            pl.col("^(avg|median|count)_.*_house$"),
-            pl.col("^(avg|median|count)_.*_apartment$"),
-            pl.col("^(avg|median|count)_.*_global$"),
-            pl.col("^price_growth_pct_.*$"),
-        ]
+        .with_columns(
+            (
+                (pl.col("growth_prix_m2") - pl.col("growth_prix_m2").mean())
+                / pl.col("growth_prix_m2").std()
+            ).alias("growth_prix_m2_standardized")
+        )
     )
     return (dvf_final,)
 
 
 @app.cell
 def _(dvf_final):
-    dvf_final.limit(10).collect()
+    dvf_final
     return
 
 
@@ -545,20 +378,13 @@ def _(SELECTED_FACILITY_TYPES: list[str], bpe_data_file, pl):
         )
         .filter(pl.col("GEO_OBJECT").is_in(["ARM", "COM"]))
         .filter(pl.col("FACILITY_TYPE").is_in(SELECTED_FACILITY_TYPES))
+        .filter(
+            ~pl.col("GEO").str.starts_with("97")
+            & ~pl.col("GEO").str.starts_with("98")
+        )
         .drop("GEO_OBJECT")
     )
     return (bpe_base,)
-
-
-@app.cell
-def _(bpe_base, dvf_final):
-    bpe_filtered = bpe_base.join(
-        dvf_final.select("code_commune").unique().lazy(),
-        left_on="GEO",
-        right_on="code_commune",
-        how="semi",
-    )
-    return (bpe_filtered,)
 
 
 @app.cell
@@ -581,31 +407,47 @@ def _(SELECTED_FACILITY_TYPES: list[str], bpe_metadata_file, pl):
 
 
 @app.cell
-def _(bpe_filtered, label_mapping, pl):
+def _(bpe_base, label_mapping, pl):
     bpe_final = (
-        bpe_filtered.collect()
+        bpe_base.collect()
+        .rename({"GEO": "code_commune"})
+        .with_columns(pl.col("OBS_VALUE").cast(pl.Int64))
         .pivot(
             on="FACILITY_TYPE",
             values="OBS_VALUE",
-            index="GEO",
+            index="code_commune",
             aggregate_function="sum",
         )
         .fill_null(0)
         .rename(label_mapping)
-        .with_columns(pl.sum_horizontal(pl.exclude("GEO")).alias("Total"))
+        .with_columns(pl.sum_horizontal(pl.exclude("code_commune")).alias("Total"))
     )
     return (bpe_final,)
 
 
 @app.cell
 def _(bpe_final):
-    bpe_final.limit(10)
+    bpe_final
     return
 
 
 @app.cell
-def _(bpe_final, communes_path, label_mapping, pl):
-    bpe_renamed = bpe_final.rename({"GEO": "code_commune"}).lazy()
+def _(bpe_final, communes_path, dvf_final, label_mapping, pl):
+    bpe_with_normalized_total = bpe_final.with_columns(
+        (
+            (pl.col("Total") - pl.col("Total").mean())
+            / pl.col("Total").std()
+        ).alias("Total_normalized")
+    )
+
+    bpe_renamed = bpe_with_normalized_total.lazy()
+
+    # Add all DVF communes (even those without BPE data), filling with 0
+    dvf_communes_only = dvf_final.select("code_commune").unique().lazy()
+
+    bpe_with_all_communes = dvf_communes_only.join(
+        bpe_renamed, on="code_commune", how="left"
+    ).fill_null(0)
 
     communes_gps = (
         pl.scan_csv(communes_path, schema_overrides={"code_insee": pl.Utf8})
@@ -614,7 +456,7 @@ def _(bpe_final, communes_path, label_mapping, pl):
     )
 
     commune_facilities_with_gps = (
-        bpe_renamed.join(
+        bpe_with_all_communes.join(
             communes_gps,
             on="code_commune",
             how="left",
@@ -702,8 +544,10 @@ def _(commune_facilities_with_gps, facility_columns, pl):
 
 @app.cell
 def _(bpe_with_distances, dvf_final):
-    final_dataset_with_distances = bpe_with_distances.join(
-        dvf_final, on="code_commune", how="left"
+    bpe_to_join = bpe_with_distances.unique()
+
+    final_dataset_with_distances = dvf_final.lazy().join(
+        bpe_to_join, on="code_commune", how="inner"
     )
     return (final_dataset_with_distances,)
 
@@ -719,12 +563,12 @@ def _(Path, final_dataset_with_distances):
     print(f"Final dataset with distances saved to {output_file}")
     print(f"Shape: {collected_dataset.shape}")
     print(f"Columns: {collected_dataset.columns}")
-    return
+    return (collected_dataset,)
 
 
 @app.cell
-def _(final_dataset_with_distances):
-    final_dataset_with_distances.limit(5).collect()
+def _(collected_dataset):
+    collected_dataset.head()
     return
 
 
