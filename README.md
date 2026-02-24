@@ -39,10 +39,10 @@ Data pipeline merging **3.2M+ real estate transactions** with **public facilitie
 
 **Modern Python data engineering tools chosen for performance at scale:**
 
-- **Polars**: Lazy evaluation + streaming for memory-efficient processing of multi-GB datasets
-- **Marimo**: Reactive notebooks with built-in data lineage tracking
-- **uv**: Fast dependency resolution (10-100x faster than pip)
-- **Ruff**: Linting + formatting (10-100x faster than Black/Flake8)
+- **🐻‍❄️  Polars**: Lazy evaluation + streaming for memory-efficient processing of multi-GB datasets
+- **📝 Marimo**: Reactive notebooks with built-in data lineage tracking
+- **⚡ uv**: Fast dependency resolution (10-100x faster than pip)
+- **🚨 Ruff**: Linting + formatting (10-100x faster than Black/Flake8)
 
 ## Quickstart
 
